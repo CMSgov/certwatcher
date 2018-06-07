@@ -147,7 +147,7 @@ func notify(host, desc string, cfg *ini.File, days int, err error, verbose bool)
 		mailhost,
 	)
 
-	to := []string{section.Key("rcpt").String()}
+	to := strings.Split(section.Key("rcpt").String(), ",")
 	var subject, body string
 	if err == errExpiringSoon {
 		subject = fmt.Sprintf("Subject: %s certificate expiring soon: %s", section.Key("subjectprefix").String(), desc)
