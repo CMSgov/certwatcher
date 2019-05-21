@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/smtp"
 	"os"
 	"strings"
@@ -17,9 +18,8 @@ import (
 )
 
 var (
-	errExpiringSoon error = errors.New("expiring soon")
-	errExpired            = errors.New("expired")
-	errTimeout            = errors.New("timeout connecting to host")
+	errExpiringSoon = errors.New("expiring soon")
+	errExpired      = errors.New("expired")
 )
 
 func main() {
@@ -43,14 +43,19 @@ func main() {
 	}
 
 	rdr := csv.NewReader(f)
+	rdr.FieldsPerRecord = 2
+	rdr.Comment = '#'
 	records, err := rdr.ReadAll()
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("could not read %s: %s", *urlFile, err)
 	}
 
 	var wg sync.WaitGroup
 	for _, r := range records {
 		host, desc := r[0], r[1]
+		if desc == "" {
+			desc = host
+		}
 
 		wg.Add(1)
 
@@ -72,31 +77,16 @@ func main() {
 }
 
 func check(host, port string, days int, verbose bool) error {
-	var conn *tls.Conn
-
-	errc := make(chan error, 1)
-	go func() {
-		var err error
-		conn, err = tls.Dial("tcp", host+":"+port, &tls.Config{
-			InsecureSkipVerify: true,
-		})
-		if err != nil {
-			errc <- err
-		}
-
-		errc <- nil
-	}()
-
-	select {
-	case err := <-errc:
-		if err != nil {
-			return err
-		}
-	case <-time.Tick(5 * time.Second):
-		return errTimeout
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	conn, err := tls.DialWithDialer(dialer, "tcp", host+":"+port, &tls.Config{
+		InsecureSkipVerify: true,
+	})
+	if err != nil {
+		return err
 	}
 
 	defer conn.Close()
+
 	if err := conn.Handshake(); err != nil {
 		return err
 	}
@@ -171,7 +161,14 @@ func notify(host, desc string, cfg *ini.File, days int, err error, verbose bool)
 		log.Printf("notify: sending host %s expiration notification to %s", host, section.Key("rcpt").String())
 	}
 
-	if err := smtp.SendMail(mailhost+":"+port, auth, section.Key("from").String(), to, msg); err != nil {
+	errc := make(chan error, 1)
+	go func() {
+		errc <- smtp.SendMail(mailhost+":"+port, auth, section.Key("from").String(), to, msg)
+	}()
+	select {
+	case err := <-errc:
 		log.Fatalf("could not send email: %s", err)
+	case <-time.After(30 * time.Second):
+		log.Fatalf("Timeout reaching mail server")
 	}
 }
